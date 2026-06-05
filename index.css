@@ -1,0 +1,929 @@
+import { useState, useEffect } from 'react';
+
+// --- CONFIGURACIÓN DE SUPABASE REAL EN LA NUBE ---
+const SUPABASE_URL = 'https://sketmnjfxtktxaltyorv.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_jzluFD1A_UmTcDYmExbxUQ_wF8lawbp';
+
+const TABS = ['Pedidos', 'Inventario', 'Movimientos'];
+
+const estadoColores: { [key: string]: string } = {
+  Pendiente: '#e8a838',
+  'En proceso': '#3a8fe8',
+  Listo: '#38c172',
+  Entregado: '#8b8b8b',
+};
+
+// Función auxiliar para conectarnos a la base de datos de internet sin instalar librerías extras
+async function supabaseFetch(
+  table: string,
+  method: string,
+  body?: any,
+  id?: number
+) {
+  let url = `${SUPABASE_URL}/rest/v1/${table}`;
+  if (id) url += `?id=eq.${id}`;
+
+  const headers: any = {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    Prefer: method === 'GET' ? 'return=representation' : 'return=minimal',
+  };
+
+  const options: any = { method, headers };
+  if (body) options.body = JSON.stringify(body);
+
+  try {
+    const res = await fetch(url, options);
+    if (method === 'GET') return await res.json();
+  } catch (err) {
+    console.error('Error en Supabase:', err);
+  }
+  return null;
+}
+
+export default function CarpinteriaApp() {
+  const [tab, setTab] = useState('Pedidos');
+
+  // --- ESTADOS ---
+  const [inventario, setInventario] = useState<any[]>([]);
+  const [pedidos, setPedidos] = useState<any[]>([]);
+  const [movimientos, setMovimientos] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [showPedidoForm, setShowPedidoForm] = useState(false);
+  const [showInvForm, setShowInvForm] = useState(false);
+  const [showMovForm, setShowMovForm] = useState(false);
+  const [editPedido, setEditPedido] = useState<number | null>(null);
+
+  const [pedidoForm, setPedidoForm] = useState({
+    cliente: '',
+    descripcion: '',
+    precio: '',
+    fecha: '',
+    notas: '',
+    estado: 'Pendiente',
+  });
+  const [invForm, setInvForm] = useState({
+    nombre: '',
+    cantidad: '',
+    unidad: '',
+  });
+  const [movForm, setMovForm] = useState({
+    tipo: 'entrada',
+    material: '',
+    cantidad: '',
+    nota: '',
+  });
+
+  // --- CARGAR DATOS DESDE LA NUBE AL EMPEZAR ---
+  useEffect(() => {
+    async function cargarTodo() {
+      setLoading(true);
+      const dataPedidos = await supabaseFetch('pedidos', 'GET');
+      const dataInventario = await supabaseFetch('inventario', 'GET');
+      const dataMovimientos = await supabaseFetch('movimientos', 'GET');
+
+      if (dataPedidos) setPedidos(dataPedidos);
+      if (dataInventario) setInventario(dataInventario);
+      if (dataMovimientos) setMovimientos(dataMovimientos);
+      setLoading(false);
+    }
+    cargarTodo();
+  }, []);
+
+  // --- LOGICA DE BD: PEDIDOS ---
+  async function savePedido() {
+    if (!pedidoForm.cliente || !pedidoForm.descripcion) return;
+    const payload = { ...pedidoForm, precio: Number(pedidoForm.precio) };
+
+    if (editPedido) {
+      await supabaseFetch('pedidos', 'PATCH', payload, editPedido);
+      setPedidos(
+        pedidos.map((p) => (p.id === editPedido ? { ...p, ...payload } : p))
+      );
+      setEditPedido(null);
+    } else {
+      await supabaseFetch('pedidos', 'POST', payload);
+      const refresh = await supabaseFetch('pedidos', 'GET');
+      if (refresh) setPedidos(refresh);
+    }
+    setPedidoForm({
+      cliente: '',
+      descripcion: '',
+      precio: '',
+      fecha: '',
+      notas: '',
+      estado: 'Pendiente',
+    });
+    setShowPedidoForm(false);
+  }
+
+  function startEdit(p: any) {
+    setEditPedido(p.id);
+    setPedidoForm({
+      cliente: p.cliente,
+      descripcion: p.descripcion,
+      precio: p.precio,
+      fecha: p.fecha,
+      notas: p.notes || p.notas || '',
+      estado: p.estado,
+    });
+    setShowPedidoForm(true);
+  }
+
+  async function cambiarEstado(id: number, nuevoEstado: string) {
+    await supabaseFetch('pedidos', 'PATCH', { estado: nuevoEstado }, id);
+    setPedidos(
+      pedidos.map((p) => (p.id === id ? { ...p, estado: nuevoEstado } : p))
+    );
+  }
+
+  async function deletePedido(id: number) {
+    if (!confirm('¿Eliminar pedido de forma permanente?')) return;
+    await supabaseFetch('pedidos', 'DELETE', null, id);
+    setPedidos(pedidos.filter((p) => p.id !== id));
+  }
+
+  // --- LOGICA DE BD: INVENTARIO ---
+  async function saveInv() {
+    if (!invForm.nombre || !invForm.cantidad) return;
+    const payload = {
+      nombre: invForm.nombre,
+      cantidad: Number(invForm.cantidad),
+      unidad: invForm.unidad,
+    };
+    await supabaseFetch('inventario', 'POST', payload);
+    const refresh = await supabaseFetch('inventario', 'GET');
+    if (refresh) setInventario(refresh);
+    setInvForm({ nombre: '', cantidad: '', unidad: '' });
+    setShowInvForm(false);
+  }
+
+  async function deleteInv(id: number) {
+    if (!confirm('¿Eliminar este material?')) return;
+    await supabaseFetch('inventario', 'DELETE', null, id);
+    setInventario(inventario.filter((i) => i.id !== id));
+  }
+
+  // --- LOGICA DE BD: MOVIMIENTOS ---
+  async function saveMov() {
+    if (!movForm.material || !movForm.cantidad) return;
+    const qty = Number(movForm.cantidad);
+    const fechaActual = new Date().toISOString().split('T')[0];
+
+    const payloadMov = {
+      tipo: movForm.tipo,
+      material: movForm.material,
+      cantidad: qty,
+      fecha: fechaActual,
+      nota: movForm.nota,
+    };
+    await supabaseFetch('movimientos', 'POST', payloadMov);
+
+    const itemInventario = inventario.find(
+      (i) => i.nombre === movForm.material
+    );
+    if (itemInventario) {
+      const nuevaCant =
+        movForm.tipo === 'entrada'
+          ? itemInventario.cantidad + qty
+          : Math.max(0, itemInventario.cantidad - qty);
+      await supabaseFetch(
+        'inventario',
+        'PATCH',
+        { cantidad: nuevaCant },
+        itemInventario.id
+      );
+    }
+
+    const refreshMov = await supabaseFetch('movimientos', 'GET');
+    const refreshInv = await supabaseFetch('inventario', 'GET');
+    if (refreshMov) setMovimientos(refreshMov);
+    if (refreshInv) setInventario(refreshInv);
+
+    setMovForm({ tipo: 'entrada', material: '', cantidad: '', nota: '' });
+    setShowMovForm(false);
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        background: '#1a1208',
+        fontFamily: 'Georgia, serif',
+        color: '#f5ead0',
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          background: '#2d1f0a',
+          borderBottom: '3px solid #8b6220',
+          padding: '0 24px',
+        }}
+      >
+        <div style={{ maxWidth: 900, margin: '0 auto' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 14,
+              padding: '16px 0 10px',
+            }}
+          >
+            <span style={{ fontSize: 34 }}>🪵</span>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#f0c060' }}>
+              Mi Carpintería{' '}
+              <span style={{ fontSize: 12, opacity: 0.6 }}>
+                (Nube Conectada)
+              </span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {TABS.map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                style={{
+                  padding: '9px 20px',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  fontFamily: 'Georgia, serif',
+                  borderRadius: '8px 8px 0 0',
+                  fontWeight: tab === t ? 700 : 400,
+                  background: tab === t ? '#f0c060' : 'transparent',
+                  color: tab === t ? '#2d1f0a' : '#c8a060',
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 900, margin: '0 auto', padding: '24px 16px' }}>
+        {loading ? (
+          <div style={{ textAlign: 'center', color: '#f0c060', padding: 40 }}>
+            Conectando con la nube de la carpintería...
+          </div>
+        ) : (
+          <>
+            {/* ===== TAB PEDIDOS ===== */}
+            {tab === 'Pedidos' && (
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 16,
+                  }}
+                >
+                  <h2 style={{ margin: 0, color: '#f0c060', fontSize: 19 }}>
+                    Pedidos
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setEditPedido(null);
+                      setPedidoForm({
+                        cliente: '',
+                        descripcion: '',
+                        precio: '',
+                        fecha: '',
+                        notas: '',
+                        estado: 'Pendiente',
+                      });
+                      setShowPedidoForm(true);
+                    }}
+                    style={btnStyle('#f0c060', '#2d1f0a')}
+                  >
+                    + Nuevo pedido
+                  </button>
+                </div>
+
+                {showPedidoForm && (
+                  <div style={cardStyle}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ gridColumn: '1/-1' }}>
+                        <label style={labelStyle}>Cliente *</label>
+                        <input
+                          style={inputStyle}
+                          value={pedidoForm.cliente}
+                          onChange={(e) =>
+                            setPedidoForm({
+                              ...pedidoForm,
+                              cliente: e.target.value,
+                            })
+                          }
+                          placeholder="Nombre del cliente"
+                        />
+                      </div>
+                      <div style={{ gridColumn: '1/-1' }}>
+                        <label style={labelStyle}>Descripción *</label>
+                        <textarea
+                          style={{
+                            ...inputStyle,
+                            height: 65,
+                            resize: 'vertical',
+                          }}
+                          value={pedidoForm.descripcion}
+                          onChange={(e) =>
+                            setPedidoForm({
+                              ...pedidoForm,
+                              descripcion: e.target.value,
+                            })
+                          }
+                          placeholder="Qué se va a hacer..."
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Precio ($)</label>
+                        <input
+                          style={inputStyle}
+                          type="number"
+                          value={pedidoForm.precio}
+                          onChange={(e) =>
+                            setPedidoForm({
+                              ...pedidoForm,
+                              precio: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Fecha entrega</label>
+                        <input
+                          style={inputStyle}
+                          type="date"
+                          value={pedidoForm.fecha}
+                          onChange={(e) =>
+                            setPedidoForm({
+                              ...pedidoForm,
+                              fecha: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div style={{ gridColumn: '1/-1' }}>
+                        <label style={labelStyle}>Notas</label>
+                        <input
+                          style={inputStyle}
+                          value={pedidoForm.notas}
+                          onChange={(e) =>
+                            setPedidoForm({
+                              ...pedidoForm,
+                              notas: e.target.value,
+                            })
+                          }
+                          placeholder="Materiales, detalles..."
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+                      <button
+                        onClick={savePedido}
+                        style={btnStyle('#f0c060', '#2d1f0a')}
+                      >
+                        {editPedido ? 'Guardar' : 'Agregar'}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowPedidoForm(false);
+                          setEditPedido(null);
+                        }}
+                        style={btnStyle('#444', '#f5ead0')}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {pedidos.length === 0 && !showPedidoForm && (
+                  <div
+                    style={{
+                      color: '#c8a060',
+                      textAlign: 'center',
+                      padding: '60px 0',
+                      opacity: 0.7,
+                    }}
+                  >
+                    La base de datos está vacía. ¡Cargá el primer pedido!
+                  </div>
+                )}
+
+                <div
+                  style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+                >
+                  {pedidos.map((p: any) => (
+                    <div
+                      key={p.id}
+                      style={{
+                        ...cardStyle,
+                        borderLeft: `4px solid ${
+                          estadoColores[p.estado] || '#8b8b8b'
+                        }`,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          flexWrap: 'wrap',
+                          gap: 10,
+                        }}
+                      >
+                        <div style={{ flex: 1 }}>
+                          <div
+                            style={{
+                              fontSize: 16,
+                              fontWeight: 700,
+                              color: '#f0c060',
+                            }}
+                          >
+                            {p.cliente}
+                          </div>
+                          <div style={{ color: '#f5ead0', marginTop: 4 }}>
+                            {p.descripcion}
+                          </div>
+                          {(p.notas || p.notes) && (
+                            <div
+                              style={{
+                                color: '#c8a060',
+                                fontSize: 13,
+                                marginTop: 3,
+                              }}
+                            >
+                              📝 {p.notas || p.notes}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: 'flex',
+                              gap: 14,
+                              marginTop: 8,
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            {p.fecha && (
+                              <span style={{ color: '#c8a060', fontSize: 13 }}>
+                                📅 {p.fecha}
+                              </span>
+                            )}
+                            {p.precio > 0 && (
+                              <span
+                                style={{ color: '#38c172', fontWeight: 700 }}
+                              >
+                                ${p.precio.toLocaleString()}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                            alignItems: 'flex-end',
+                          }}
+                        >
+                          <span
+                            style={{
+                              background:
+                                (estadoColores[p.estado] || '#8b8b8b') + '33',
+                              color: estadoColores[p.estado] || '#8b8b8b',
+                              padding: '3px 12px',
+                              borderRadius: 20,
+                              fontSize: 13,
+                              border: `1px solid ${
+                                estadoColores[p.estado] || '#8b8b8b'
+                              }`,
+                            }}
+                          >
+                            {p.estado}
+                          </span>
+                          <select
+                            value={p.estado}
+                            onChange={(e) =>
+                              cambiarEstado(p.id, e.target.value)
+                            }
+                            style={{
+                              ...inputStyle,
+                              padding: '4px 8px',
+                              fontSize: 12,
+                              width: 'auto',
+                            }}
+                          >
+                            {Object.keys(estadoColores).map((e) => (
+                              <option key={e}>{e}</option>
+                            ))}
+                          </select>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              onClick={() => startEdit(p)}
+                              style={{
+                                ...smallBtn,
+                                color: '#3a8fe8',
+                                border: '1px solid #3a8fe8',
+                              }}
+                            >
+                              ✏
+                            </button>
+                            <button
+                              onClick={() => deletePedido(p.id)}
+                              style={{
+                                ...smallBtn,
+                                color: '#e85050',
+                                border: '1px solid #e85050',
+                              }}
+                            >
+                              🗑
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ===== TAB INVENTARIO ===== */}
+            {tab === 'Inventario' && (
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 16,
+                  }}
+                >
+                  <h2 style={{ margin: 0, color: '#f0c060', fontSize: 19 }}>
+                    Inventario
+                  </h2>
+                  <button
+                    onClick={() => setShowInvForm(!showInvForm)}
+                    style={btnStyle('#f0c060', '#2d1f0a')}
+                  >
+                    + Agregar material
+                  </button>
+                </div>
+
+                {showInvForm && (
+                  <div style={cardStyle}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ gridColumn: '1/-1' }}>
+                        <label style={labelStyle}>Material *</label>
+                        <input
+                          style={inputStyle}
+                          value={invForm.nombre}
+                          onChange={(e) =>
+                            setInvForm({ ...invForm, nombre: e.target.value })
+                          }
+                          placeholder="Ej: Madera de pino"
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Cantidad *</label>
+                        <input
+                          style={inputStyle}
+                          type="number"
+                          value={invForm.cantidad}
+                          onChange={(e) =>
+                            setInvForm({ ...invForm, cantidad: e.target.value })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Unidad</label>
+                        <input
+                          style={inputStyle}
+                          value={invForm.unidad}
+                          onChange={(e) =>
+                            setInvForm({ ...invForm, unidad: e.target.value })
+                          }
+                          placeholder="m², kg, unidades..."
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+                      <button
+                        onClick={saveInv}
+                        style={btnStyle('#f0c060', '#2d1f0a')}
+                      >
+                        Agregar
+                      </button>
+                      <button
+                        onClick={() => setShowInvForm(false)}
+                        style={btnStyle('#444', '#f5ead0')}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {inventario.length === 0 && !showInvForm && (
+                  <div
+                    style={{
+                      color: '#c8a060',
+                      textAlign: 'center',
+                      padding: '60px 0',
+                      opacity: 0.7,
+                    }}
+                  >
+                    Sin materiales en la nube todavía.
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      'repeat(auto-fill, minmax(200px, 1fr))',
+                    gap: 12,
+                  }}
+                >
+                  {inventario.map((item: any) => (
+                    <div
+                      key={item.id}
+                      style={{ ...cardStyle, textAlign: 'center' }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: '#f0c060',
+                          marginBottom: 10,
+                        }}
+                      >
+                        {item.nombre}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 30,
+                          fontWeight: 700,
+                          color: '#38c172',
+                        }}
+                      >
+                        {item.cantidad}
+                      </div>
+                      <div style={{ color: '#c8a060', fontSize: 13 }}>
+                        {item.unidad}
+                      </div>
+                      <button
+                        onClick={() => deleteInv(item.id)}
+                        style={{
+                          ...smallBtn,
+                          color: '#e85050',
+                          border: '1px solid #e85050',
+                          marginTop: 10,
+                        }}
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ===== TAB MOVIMIENTOS ===== */}
+            {tab === 'Movimientos' && (
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 16,
+                  }}
+                >
+                  <h2 style={{ margin: 0, color: '#f0c060', fontSize: 19 }}>
+                    Entradas y Salidas
+                  </h2>
+                  <button
+                    onClick={() => setShowMovForm(!showMovForm)}
+                    style={btnStyle('#f0c060', '#2d1f0a')}
+                  >
+                    + Registrar
+                  </button>
+                </div>
+
+                {showMovForm && (
+                  <div style={cardStyle}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 12,
+                      }}
+                    >
+                      <div>
+                        <label style={labelStyle}>Tipo *</label>
+                        <select
+                          style={inputStyle}
+                          value={movForm.tipo}
+                          onChange={(e) =>
+                            setMovForm({ ...movForm, tipo: e.target.value })
+                          }
+                        >
+                          <option value="entrada">📦 Entrada</option>
+                          <option value="salida">🔨 Salida</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Material *</label>
+                        <select
+                          style={inputStyle}
+                          value={movForm.material}
+                          onChange={(e) =>
+                            setMovForm({ ...movForm, material: e.target.value })
+                          }
+                        >
+                          <option value="">-- Seleccionar --</option>
+                          {inventario.map((i: any) => (
+                            <option key={i.id} value={i.nombre}>
+                              {i.nombre}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Cantidad *</label>
+                        <input
+                          style={inputStyle}
+                          type="number"
+                          value={movForm.cantidad}
+                          onChange={(e) =>
+                            setMovForm({ ...movForm, cantidad: e.target.value })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Nota</label>
+                        <input
+                          style={inputStyle}
+                          value={movForm.nota}
+                          onChange={(e) =>
+                            setMovForm({ ...movForm, nota: e.target.value })
+                          }
+                          placeholder="Opcional..."
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+                      <button
+                        onClick={saveMov}
+                        style={btnStyle('#f0c060', '#2d1f0a')}
+                      >
+                        Registrar
+                      </button>
+                      <button
+                        onClick={() => setShowMovForm(false)}
+                        style={btnStyle('#444', '#f5ead0')}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {movimientos.length === 0 && !showMovForm && (
+                  <div
+                    style={{
+                      color: '#c8a060',
+                      textAlign: 'center',
+                      padding: '60px 0',
+                      opacity: 0.7,
+                    }}
+                  >
+                    Sin historial de movimientos.
+                  </div>
+                )}
+
+                <div
+                  style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+                >
+                  {movimientos.map((m: any) => (
+                    <div
+                      key={m.id}
+                      style={{
+                        ...cardStyle,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 14,
+                        padding: '12px 18px',
+                      }}
+                    >
+                      <div style={{ fontSize: 26 }}>
+                        {m.tipo === 'entrada' ? '📦' : '🔨'}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div
+                          style={{
+                            fontWeight: 700,
+                            color: m.tipo === 'entrada' ? '#38c172' : '#e8a838',
+                          }}
+                        >
+                          {m.tipo === 'entrada' ? 'Entrada' : 'Salida'} —{' '}
+                          {m.material}
+                        </div>
+                        {m.nota && (
+                          <div style={{ color: '#c8a060', fontSize: 13 }}>
+                            {m.nota}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div
+                          style={{
+                            fontSize: 20,
+                            fontWeight: 700,
+                            color: m.tipo === 'entrada' ? '#38c172' : '#e85050',
+                          }}
+                        >
+                          {m.tipo === 'entrada' ? '+' : '-'}
+                          {m.cantidad}
+                        </div>
+                        <div style={{ color: '#c8a060', fontSize: 12 }}>
+                          {m.fecha}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- ESTILOS INTERNOS ---
+const cardStyle = {
+  background: '#2d1f0a',
+  border: '1px solid #5a3e1b',
+  borderRadius: 10,
+  padding: '16px 18px',
+};
+const inputStyle = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  background: '#1a1208',
+  border: '1.5px solid #5a3e1b',
+  borderRadius: 7,
+  padding: '9px 12px',
+  color: '#f5ead0',
+  fontSize: 14,
+  fontFamily: 'Georgia, serif',
+  outline: 'none',
+};
+const labelStyle = {
+  display: 'block',
+  color: '#c8a060',
+  fontSize: 12,
+  marginBottom: 5,
+  textTransform: 'uppercase' as const,
+  letterSpacing: 0.8,
+};
+const smallBtn = {
+  padding: '5px 10px',
+  border: 'none',
+  borderRadius: 6,
+  cursor: 'pointer',
+  fontSize: 13,
+  fontFamily: 'Georgia, serif',
+  background: 'transparent',
+};
+function btnStyle(bg: string, color: string) {
+  return {
+    background: bg,
+    color,
+    border: 'none',
+    borderRadius: 8,
+    padding: '9px 18px',
+    cursor: 'pointer',
+    fontSize: 14,
+    fontWeight: 700,
+    fontFamily: 'Georgia, serif',
+  };
+}
